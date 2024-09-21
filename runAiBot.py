@@ -36,6 +36,8 @@ from modules.helpers import *
 from modules.clickers_and_finders import *
 from modules.validator import validate_config
 from typing import Literal
+from modules.answer_manager import answer_manager
+from modules.answer_capture import capture_final_answers
 # if use_resume_generator:    from resume_generator import is_logged_in_GPT, login_GPT, open_resume_chat, create_custom_resume
 
 
@@ -342,7 +344,7 @@ def answer_questions(questions_list: set, work_location: str) -> set:
     all_questions = driver.find_elements(By.CLASS_NAME, "jobs-easy-apply-form-element")
 
     for Question in all_questions:
-        # Check if it's a select Question
+        # For select questions
         select = try_xp(Question, ".//select", False)
         if select:
             label_org = "Unknown"
@@ -383,10 +385,12 @@ def answer_questions(questions_list: set, work_location: str) -> set:
                         select.select_by_index(randint(1, len(select.options)-1))
                         answer = select.first_selected_option.text
                         randomly_answered_questions.add((f'{label_org} [ {options} ]',"select"))
+            answer = select.first_selected_option.text
+            answer_manager.update_learned_answer(label_org, answer)
             questions_list.add((f'{label_org} [ {options} ]', answer, "select", prev_answer))
             continue
         
-        # Check if it's a radio Question
+        # For radio questions
         radio = try_xp(Question, './/fieldset[@data-test-form-builder-radio-button-form-component="true"]', False)
         if radio:
             prev_answer = None
@@ -440,29 +444,40 @@ def answer_questions(questions_list: set, work_location: str) -> set:
                     actions.move_to_element(ele).click().perform()
                     if not foundOption: randomly_answered_questions.add((f'{label_org} ]',"radio"))
             else: answer = prev_answer
+            selected_option = radio.find_element(By.CSS_SELECTOR, 'input[type="radio"]:checked')
+            answer = selected_option.find_element(By.XPATH, './following-sibling::label').text
+            answer_manager.update_learned_answer(label_org, answer)
             questions_list.add((label_org+" ]", answer, "radio", prev_answer))
             continue
         
-        # Check if it's a text question
+        # For text questions
         text = try_xp(Question, ".//input[@type='text']", False)
         if text: 
             do_actions = False
+            # Get the label for the question
             label = try_xp(Question, ".//label[@for]", False)
             try: label = label.find_element(By.CLASS_NAME,'visually-hidden')
             except: pass
             label_org = label.text if label else "Unknown"
-            answer = "" # years_of_experience
+            answer = "" # Default answer
             label = label_org.lower()
 
+            # Save the question to the database
+            answer_manager.update_learned_answer(label_org, "")
+
+            # Get the current value of the input field
             prev_answer = text.get_attribute("value")
+            
+            # If the field is empty or we're overwriting previous answers
             if not prev_answer or overwrite_previous_answers:
+                # Series of conditions to determine the appropriate answer based on the question label
                 if 'experience' in label or 'years' in label: answer = years_of_experience
                 elif 'phone' in label or 'mobile' in label: answer = phone_number
                 elif 'street' in label: answer = street
                 elif 'city' in label or 'location' in label or 'address' in label:
                     answer = current_city if current_city else work_location
                     do_actions = True
-                elif 'signature' in label: answer = full_name # 'signature' in label or 'legal name' in label or 'your name' in label or 'full name' in label: answer = full_name     # What if question is 'name of the city or university you attend, name of referral etc?'
+                elif 'signature' in label: answer = full_name
                 elif 'name' in label:
                     if 'full' in label: answer = full_name
                     elif 'first' in label and 'last' not in label: answer = first_name
@@ -500,19 +515,28 @@ def answer_questions(questions_list: set, work_location: str) -> set:
                 elif 'zip' in label or 'postal' in label or 'code' in label: answer = zipcode
                 elif 'country' in label: answer = country
                 else: answer = answer_common_questions(label,answer)
+                
+                # If no specific answer was found, use a default and mark as randomly answered
                 if answer == "":
                     randomly_answered_questions.add((label_org, "text"))
                     answer = years_of_experience
+                
+                # Clear the input field and enter the answer
                 text.clear()
                 text.send_keys(answer)
+                
+                # Special handling for some questions (like city/location)
                 if do_actions:
                     sleep(2)
                     actions.send_keys(Keys.ARROW_DOWN)
                     actions.send_keys(Keys.ENTER).perform()
-            questions_list.add((label, text.get_attribute("value"), "text", prev_answer))
+            
+            answer = text.get_attribute("value")
+            answer_manager.update_learned_answer(label_org, answer)
+            questions_list.add((label, answer, "text", prev_answer))
             continue
 
-        # Check if it's a textarea question
+        # For textarea questions
         text_area = try_xp(Question, ".//textarea", False)
         if text_area:
             label = try_xp(Question, ".//label[@for]", False)
@@ -527,10 +551,12 @@ def answer_questions(questions_list: set, work_location: str) -> set:
                 text_area.send_keys(answer)
                 if answer == "": 
                     randomly_answered_questions.add((label_org, "textarea"))
-            questions_list.add((label, text_area.get_attribute("value"), "textarea", prev_answer))
+            answer = text_area.get_attribute("value")
+            answer_manager.update_learned_answer(label_org, answer)
+            questions_list.add((label, answer, "textarea", prev_answer))
             continue
 
-        # Check if it's a checkbox question
+        # For checkbox questions
         checkbox = try_xp(Question, ".//input[@type='checkbox']", False)
         if checkbox:
             label = try_xp(Question, ".//span[@class='visually-hidden']", False)
@@ -547,9 +573,10 @@ def answer_questions(questions_list: set, work_location: str) -> set:
                 except Exception as e: 
                     print_lg("Checkbox click failed!", e)
                     pass
+            answer = "Checked" if checkbox.is_selected() else "Unchecked"
+            answer_manager.update_learned_answer(label_org, answer)
             questions_list.add((f'{label} ([X] {answer})', checked, "checkbox", prev_answer))
             continue
-
 
     # Select todays date
     try_xp(driver, "//button[contains(@aria-label, 'This is today')]")
@@ -557,6 +584,10 @@ def answer_questions(questions_list: set, work_location: str) -> set:
     # Collect important skills
     # if 'do you have' in label and 'experience' in label and ' in ' in label -> Get word (skill) after ' in ' from label
     # if 'how many years of experience do you have in ' in label -> Get word (skill) after ' in '
+
+    # Save all answers to the database
+    for question, answer, question_type, prev_answer in questions_list:
+        answer_manager.update_learned_answer(question, answer)
 
     return questions_list
 
@@ -842,7 +873,24 @@ def apply_to_jobs(search_terms: list[str]) -> None:
                                     if decision == "Discard Application": raise Exception("Job application discarded by user!")
                                     pause_before_submit = False if "Disable Pause" == decision else True
                                     try_xp(modal, ".//span[normalize-space(.)='Review']")
+                               
+                                # Save answers to database here
+                                for question, answer, question_type, prev_answer in questions_list:
+                                    answer_manager.update_learned_answer(question, answer)
+                               
                                 if wait_span_click(driver, "Submit application", 2, scrollTop=True): 
+                                    try:
+                                        final_questions_list = capture_final_answers(driver)
+                                        
+                                        # Save answers to database
+                                        for question, answer, question_type in final_questions_list:
+                                            answer_manager.update_learned_answer(question, answer)
+                                        
+                                        print_lg("Successfully saved final answers to database.")
+                                    except Exception as e:
+                                        print_lg(f"Failed to capture final answers: {str(e)}")
+                                        # Optionally, you could log this error for later review
+                                        # log_error(f"Failed to capture final answers for job {job_id}: {str(e)}")
                                     date_applied = datetime.now()
                                     if not wait_span_click(driver, "Done", 2): actions.send_keys(Keys.ESCAPE).perform()
                                 elif errored != "stuck" and cur_pause_before_submit and "Yes" in pyautogui.confirm("You submitted the application, didn't you 😒?", "Failed to find Submit Application!", ["Yes", "No"]):
@@ -1009,3 +1057,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

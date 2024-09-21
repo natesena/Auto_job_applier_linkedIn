@@ -6,6 +6,7 @@ all resumes
 logs
 
 old
+*.db
 
 secrets.py
 config/personals.py
