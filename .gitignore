@@ -7,8 +7,12 @@ logs
 
 old
 *.db
+*/*.db
 
 secrets.py
 config/personals.py
 
 config/secrets.py
+
+.DS_Store
+*/.DS_Store
